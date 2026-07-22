@@ -1,4 +1,4 @@
-name: Daily scrape
+name: daily-scrape
 
 on:
   schedule:
