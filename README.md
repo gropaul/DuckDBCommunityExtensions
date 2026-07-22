@@ -42,10 +42,12 @@ SELECT extension, stars FROM v_latest_github ORDER BY stars DESC NULLS LAST LIMI
 | `catalog` | Latest `description.yml` metadata per extension | Overwritten each run; `first_seen` preserved |
 | `catalog_history` | Changelog of metadata (version bumps, description edits) | Append-on-change, deduped by content hash |
 | `github_snapshots` | Daily GitHub stats per source repo | Append-only, one row per extension per day |
+| `readmes` | Each source repo's README (full text) | Overwritten each run; `last_changed` bumps only on edits |
 
 ## Convenience views
 
-- `v_latest_github` — newest GitHub snapshot per extension, joined to the catalog
+- `v_latest_github` — newest GitHub snapshot per extension, joined to the catalog and its README text
+- `v_readmes` — README metadata (path, size, `last_changed`); full text lives in the `readmes` table
 - `v_stars_over_time` — the accruing daily stars/forks/watchers/issues series
 - `v_download_growth` — week-over-week download deltas
 - `v_activity` — repo staleness (`days_since_push`), latest release

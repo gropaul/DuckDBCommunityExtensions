@@ -30,8 +30,10 @@ Usage
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures as cf
 import datetime as dt
+import hashlib
 import os
 import sys
 import time
@@ -206,6 +208,24 @@ def github_snapshot(session: requests.Session, github_repo: str) -> dict[str, An
     return snap
 
 
+def github_readme(session: requests.Session, github_repo: str) -> Optional[dict[str, Any]]:
+    """Fetch a repo's rendered README (any filename/branch) via the API."""
+    r = gh_get(session, f"{API}/repos/{github_repo}/readme", tolerate_404=True)
+    if r is None:
+        return None
+    d = r.json()
+    try:
+        content = base64.b64decode(d.get("content", "")).decode("utf-8", "replace")
+    except (ValueError, TypeError):
+        return None
+    return {
+        "path": d.get("path"),
+        "content": content,
+        "chars": len(content),
+        "content_hash": hashlib.md5(content.encode("utf-8")).hexdigest(),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Persistence
 # --------------------------------------------------------------------------- #
@@ -250,6 +270,20 @@ def init_schema(con: duckdb.DuckDBPyConnection) -> None:
         day        DATE,
         downloads  BIGINT,
         PRIMARY KEY (extension, day)
+    );
+
+    -- Current README of each extension's source repo. Overwritten each run;
+    -- last_changed tracks when the content last actually changed.
+    CREATE TABLE IF NOT EXISTS readmes (
+        extension     VARCHAR PRIMARY KEY,
+        github_repo   VARCHAR,
+        path          VARCHAR,
+        content       VARCHAR,
+        content_hash  VARCHAR,
+        chars         BIGINT,
+        first_seen    DATE,
+        last_changed  DATE,
+        last_seen     DATE
     );
 
     CREATE TABLE IF NOT EXISTS github_snapshots (
@@ -370,6 +404,33 @@ def store_github(con: duckdb.DuckDBPyConnection, rows: list[dict], today: dt.dat
     con.execute("DROP TABLE _gh")
 
 
+def store_readmes(con: duckdb.DuckDBPyConnection, rows: list[dict], today: dt.date) -> None:
+    if not rows:
+        return
+    con.execute("CREATE TEMP TABLE _rm AS SELECT * FROM readmes LIMIT 0")
+    con.executemany(
+        "INSERT INTO _rm VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                r["extension"], r.get("github_repo"), r.get("path"), r.get("content"),
+                r.get("content_hash"), r.get("chars"), today, today, today,
+            )
+            for r in rows
+        ],
+    )
+    # Upsert: keep earliest first_seen; bump last_changed only on a hash change.
+    con.execute("""
+        INSERT OR REPLACE INTO readmes
+        SELECT n.* REPLACE (
+            COALESCE(o.first_seen, n.first_seen) AS first_seen,
+            CASE WHEN o.content_hash = n.content_hash
+                 THEN o.last_changed ELSE n.last_changed END AS last_changed
+        )
+        FROM _rm n LEFT JOIN readmes o USING (extension)
+    """)
+    con.execute("DROP TABLE _rm")
+
+
 def create_views(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("""
     -- Most recent GitHub snapshot per extension, joined to catalog.
@@ -377,12 +438,14 @@ def create_views(con: duckdb.DuckDBPyConnection) -> None:
     SELECT c.extension, c.description, c.language, c.license, c.maintainers,
            g.github_repo, g.stars, g.forks, g.watchers, g.open_issues,
            g.latest_release_tag, g.latest_release_at, g.pushed_at, g.created_at,
-           g.is_archived, g.snapshot_date
+           g.is_archived, g.snapshot_date,
+           r.path AS readme_path, r.content AS readme
     FROM catalog c
     LEFT JOIN github_snapshots g
       ON g.extension = c.extension
      AND g.snapshot_date = (SELECT max(snapshot_date) FROM github_snapshots
-                            WHERE extension = c.extension);
+                            WHERE extension = c.extension)
+    LEFT JOIN readmes r ON r.extension = c.extension;
 
     -- Stars (and other metrics) over time — the accruing daily time series.
     CREATE OR REPLACE VIEW v_stars_over_time AS
@@ -398,6 +461,12 @@ def create_views(con: duckdb.DuckDBPyConnection) -> None:
     FROM downloads
     WINDOW wd AS (PARTITION BY extension ORDER BY day)
     ORDER BY extension, day;
+
+    -- README metadata (content excluded — SELECT content FROM readmes for full text).
+    CREATE OR REPLACE VIEW v_readmes AS
+    SELECT extension, github_repo, path, chars, first_seen, last_changed, last_seen
+    FROM readmes
+    ORDER BY extension;
 
     -- Repo activity / staleness from the latest snapshot.
     CREATE OR REPLACE VIEW v_activity AS
@@ -474,22 +543,32 @@ def main() -> int:
     if not args.no_github:
         repos = [(r["extension"], r["github_repo"]) for r in catalog_rows
                  if r.get("github_repo")]
-        print(f"• github snapshots for {len(repos)} repos …", end=" ", flush=True)
+        print(f"• github snapshots + readmes for {len(repos)} repos …",
+              end=" ", flush=True)
         gh_rows: list[dict] = []
+        readme_rows: list[dict] = []
 
         def snap(item):
             ext, repo = item
             s = github_snapshot(session, repo)
             s["extension"] = ext
-            return s
+            rm = github_readme(session, repo)
+            if rm:
+                rm["extension"] = ext
+                rm["github_repo"] = repo
+            return s, rm
 
         with cf.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for s in pool.map(snap, repos):
+            for s, rm in pool.map(snap, repos):
                 gh_rows.append(s)
+                if rm:
+                    readme_rows.append(rm)
         store_github(con, gh_rows, today)
+        store_readmes(con, readme_rows, today)
         ok = sum(1 for r in gh_rows if r.get("fetch_ok"))
         total_stars = sum(r.get("stars") or 0 for r in gh_rows)
-        print(f"{ok}/{len(gh_rows)} ok, {total_stars:,} total stars")
+        print(f"{ok}/{len(gh_rows)} ok, {total_stars:,} total stars, "
+              f"{len(readme_rows)} readmes")
 
     create_views(con)
     con.close()
