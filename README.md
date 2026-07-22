@@ -23,8 +23,6 @@ USE ce;
 SELECT extension, stars FROM v_latest_github ORDER BY stars DESC NULLS LAST LIMIT 10;
 ```
 
-The raw content URL always serves the latest committed snapshot from `master`.
-
 ## Data sources
 
 1. **Download stats** — the official weekly cumulative counts behind
