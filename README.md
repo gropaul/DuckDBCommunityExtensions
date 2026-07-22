@@ -12,13 +12,10 @@ duckdb community_extensions.duckdb
 ## Query it without cloning
 
 DuckDB can attach the database directly over HTTPS from the raw GitHub content
-URL — no clone, no download step. Attaching a remote database requires `httpfs`
-and must be read-only:
+URL — no clone, no download step. A remote database must be attached read-only
+(`httpfs` autoloads):
 
 ```sql
-INSTALL httpfs;
-LOAD httpfs;
-
 ATTACH 'https://raw.githubusercontent.com/gropaul/DuckDBCommunityExtensions/master/community_extensions.duckdb'
   AS ce (READ_ONLY);
 
