@@ -9,6 +9,25 @@ Action. Clone the repo and open the file to get the full history immediately.
 duckdb community_extensions.duckdb
 ```
 
+## Query it without cloning
+
+DuckDB can attach the database directly over HTTPS from the raw GitHub content
+URL — no clone, no download step. Attaching a remote database requires `httpfs`
+and must be read-only:
+
+```sql
+INSTALL httpfs;
+LOAD httpfs;
+
+ATTACH 'https://raw.githubusercontent.com/gropaul/DuckDBCommunityExtensions/master/community_extensions.duckdb'
+  AS ce (READ_ONLY);
+
+USE ce;
+SELECT extension, stars FROM v_latest_github ORDER BY stars DESC NULLS LAST LIMIT 10;
+```
+
+The raw content URL always serves the latest committed snapshot from `master`.
+
 ## Data sources
 
 1. **Download stats** — the official weekly cumulative counts behind
